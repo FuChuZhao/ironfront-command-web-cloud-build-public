@@ -1,0 +1,76 @@
+name: build-from-private
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "SOURCE_REPO ref (branch/tag/commit)"
+        required: true
+        default: "main"
+      artifact_name:
+        description: "artifact name"
+        required: true
+        default: "web-build"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Prepare SSH key for private source clone
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.SOURCE_REPO_SSH_KEY }}" || { echo "missing SOURCE_REPO_SSH_KEY"; exit 1; }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${{ secrets.SOURCE_REPO_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Clone private source repo
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+        run: |
+          set -euo pipefail
+          test -n "${SOURCE_REPO}" || { echo "missing SOURCE_REPO variable"; exit 1; }
+          git clone "git@github.com:${SOURCE_REPO}.git" source
+
+      - name: Checkout requested source ref
+        shell: bash
+        env:
+          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          cd source
+          git fetch --tags --prune origin
+          git checkout --detach "${SOURCE_REF}"
+          echo "Checked out source_ref=${SOURCE_REF} commit=$(git rev-parse HEAD)"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Run private build entry script
+        shell: bash
+        env:
+          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          cd source
+          test -x tool/ci/build_cloud.sh || { echo "missing executable tool/ci/build_cloud.sh"; exit 1; }
+          ./tool/ci/build_cloud.sh
+
+      - name: Upload build artifact (minimal retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.inputs.artifact_name }}
+          path: |
+            source/out/**
+          retention-days: 1
+          if-no-files-found: error
